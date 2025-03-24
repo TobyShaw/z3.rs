@@ -64,10 +64,13 @@ pub struct Set<'ctx> {
     pub(crate) z3_ast: Z3_ast,
 }
 
+use std::marker::PhantomData;
+
 /// [`Ast`] node representing a sequence value.
-pub struct Seq<'ctx> {
+pub struct Seq<'ctx, Elem> {
     pub(crate) ctx: &'ctx Context,
     pub(crate) z3_ast: Z3_ast,
+    pub(crate) elem: PhantomData<Elem>,
 }
 
 /// [`Ast`] node representing a datatype or enumeration value.
@@ -195,6 +198,10 @@ macro_rules! varop {
 pub trait Ast<'ctx>: fmt::Debug {
     fn get_ctx(&self) -> &'ctx Context;
     fn get_z3_ast(&self) -> Z3_ast;
+    /// Get the [`Sort`] of the `Ast`.
+    fn get_sort_static(ctx: &'ctx Context) -> Option<Sort<'ctx>>
+    where
+        Self: Sized;
 
     // This would be great, but gives error E0071 "expected struct, variant or union type, found Self"
     // so I don't think we can write a generic constructor like this.
@@ -422,8 +429,110 @@ pub trait Ast<'ctx>: fmt::Debug {
     }
 }
 
-macro_rules! impl_ast {
+macro_rules! impl_ast_1 {
     ($ast:ident) => {
+        impl<'ctx, Elem: Ast<'ctx>> Ast<'ctx> for $ast<'ctx, Elem> {
+            unsafe fn wrap(ctx: &'ctx Context, ast: Z3_ast) -> Self {
+                assert!(!ast.is_null());
+                Self {
+                    ctx,
+                    z3_ast: {
+                        debug!(
+                            "new ast: id = {}, pointer = {:p}",
+                            Z3_get_ast_id(ctx.z3_ctx, ast),
+                            ast
+                        );
+                        Z3_inc_ref(ctx.z3_ctx, ast);
+                        ast
+                    },
+                    elem: std::marker::PhantomData,
+                }
+            }
+
+            fn get_ctx(&self) -> &'ctx Context {
+                self.ctx
+            }
+
+            fn get_z3_ast(&self) -> Z3_ast {
+                self.z3_ast
+            }
+
+            fn get_sort_static(_ctx: &'ctx Context) -> Option<Sort<'ctx>> {
+                None
+            }
+        }
+
+        impl<'ctx, Elem: Ast<'ctx>> From<$ast<'ctx, Elem>> for Z3_ast {
+            fn from(ast: $ast<'ctx, Elem>) -> Self {
+                ast.z3_ast
+            }
+        }
+
+        impl<'ctx, Elem: Ast<'ctx>> PartialEq for $ast<'ctx, Elem> {
+            fn eq(&self, other: &$ast<'ctx, Elem>) -> bool {
+                assert_eq!(self.ctx, other.ctx);
+                unsafe { Z3_is_eq_ast(self.ctx.z3_ctx, self.z3_ast, other.z3_ast) }
+            }
+        }
+
+        impl<'ctx, Elem: Ast<'ctx>> Eq for $ast<'ctx, Elem> {}
+
+        impl<'ctx, Elem: Ast<'ctx>> Clone for $ast<'ctx, Elem> {
+            fn clone(&self) -> Self {
+                debug!(
+                    "clone ast: id = {}, pointer = {:p}",
+                    unsafe { Z3_get_ast_id(self.ctx.z3_ctx, self.z3_ast) },
+                    self.z3_ast
+                );
+                unsafe { Self::wrap(self.ctx, self.z3_ast) }
+            }
+        }
+
+        impl<'ctx, Elem> Drop for $ast<'ctx, Elem> {
+            fn drop(&mut self) {
+                debug!(
+                    "drop ast: id = {}, pointer = {:p}",
+                    unsafe { Z3_get_ast_id(self.ctx.z3_ctx, self.z3_ast) },
+                    self.z3_ast
+                );
+                unsafe {
+                    Z3_dec_ref(self.ctx.z3_ctx, self.z3_ast);
+                }
+            }
+        }
+
+        impl<'ctx, Elem: Ast<'ctx>> Hash for $ast<'ctx, Elem> {
+            fn hash<H: Hasher>(&self, state: &mut H) {
+                unsafe {
+                    let u = Z3_get_ast_hash(self.ctx.z3_ctx, self.z3_ast);
+                    u.hash(state);
+                }
+            }
+        }
+
+        impl<'ctx, Elem: Ast<'ctx>> fmt::Debug for $ast<'ctx, Elem> {
+            fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+                let p = unsafe { Z3_ast_to_string(self.ctx.z3_ctx, self.z3_ast) };
+                if p.is_null() {
+                    return Result::Err(fmt::Error);
+                }
+                match unsafe { CStr::from_ptr(p) }.to_str() {
+                    Ok(s) => write!(f, "{}", s),
+                    Err(_) => Result::Err(fmt::Error),
+                }
+            }
+        }
+
+        impl<'ctx, Elem: Ast<'ctx>> fmt::Display for $ast<'ctx, Elem> {
+            fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+                <Self as fmt::Debug>::fmt(self, f)
+            }
+        }
+    };
+}
+
+macro_rules! impl_ast {
+    ($ast:ident, $static_sort:expr) => {
         impl<'ctx> Ast<'ctx> for $ast<'ctx> {
             unsafe fn wrap(ctx: &'ctx Context, ast: Z3_ast) -> Self {
                 assert!(!ast.is_null());
@@ -447,6 +556,9 @@ macro_rules! impl_ast {
 
             fn get_z3_ast(&self) -> Z3_ast {
                 self.z3_ast
+            }
+            fn get_sort_static(ctx: &'ctx Context) -> Option<Sort<'ctx>> {
+                $static_sort(ctx)
             }
         }
 
@@ -519,6 +631,30 @@ macro_rules! impl_ast {
     };
 }
 
+macro_rules! impl_from_try_into_dynamic_1 {
+    ($ast:ident, $as_ast:ident) => {
+        impl<'ctx, Elem: Ast<'ctx>> From<$ast<'ctx, Elem>> for Dynamic<'ctx> {
+            fn from(ast: $ast<'ctx, Elem>) -> Self {
+                unsafe { Dynamic::wrap(ast.ctx, ast.z3_ast) }
+            }
+        }
+
+        impl<'ctx, Elem: Ast<'ctx>> From<&$ast<'ctx, Elem>> for Dynamic<'ctx> {
+            fn from(ast: &$ast<'ctx, Elem>) -> Self {
+                unsafe { Dynamic::wrap(ast.ctx, ast.z3_ast) }
+            }
+        }
+
+        impl<'ctx, Elem: Ast<'ctx>> TryFrom<Dynamic<'ctx>> for $ast<'ctx, Elem> {
+            type Error = std::string::String;
+            fn try_from(ast: Dynamic<'ctx>) -> Result<Self, std::string::String> {
+                ast.$as_ast()
+                    .ok_or_else(|| format!("Dynamic is not of requested type: {:?}", ast))
+            }
+        }
+    };
+}
+
 macro_rules! impl_from_try_into_dynamic {
     ($ast:ident, $as_ast:ident) => {
         impl<'ctx> From<$ast<'ctx>> for Dynamic<'ctx> {
@@ -543,25 +679,33 @@ macro_rules! impl_from_try_into_dynamic {
     };
 }
 
-impl_ast!(Bool);
+fn no_static_sort<'ctx>(_ctx: &'ctx Context) -> Option<Sort<'ctx>> {
+    None
+}
+macro_rules! static_sort {
+    ($make_sort:expr) => {
+        |ctx| Some($make_sort(ctx))
+    };
+}
+impl_ast!(Bool, static_sort!(Sort::bool));
 impl_from_try_into_dynamic!(Bool, as_bool);
-impl_ast!(Int);
+impl_ast!(Int, static_sort!(Sort::int));
 impl_from_try_into_dynamic!(Int, as_int);
-impl_ast!(Real);
+impl_ast!(Real, static_sort!(Sort::real));
 impl_from_try_into_dynamic!(Real, as_real);
-impl_ast!(Float);
+impl_ast!(Float, no_static_sort);
 impl_from_try_into_dynamic!(Float, as_float);
-impl_ast!(String);
+impl_ast!(String, no_static_sort);
 impl_from_try_into_dynamic!(String, as_string);
-impl_ast!(BV);
+impl_ast!(BV, no_static_sort);
 impl_from_try_into_dynamic!(BV, as_bv);
-impl_ast!(Array);
+impl_ast!(Array, no_static_sort);
 impl_from_try_into_dynamic!(Array, as_array);
-impl_ast!(Set);
+impl_ast!(Set, no_static_sort);
 impl_from_try_into_dynamic!(Set, as_set);
-impl_ast!(Seq);
-impl_from_try_into_dynamic!(Seq, as_seq);
-impl_ast!(Regexp);
+impl_ast_1!(Seq);
+impl_from_try_into_dynamic_1!(Seq, as_seq);
+impl_ast!(Regexp, no_static_sort);
 
 impl<'ctx> Int<'ctx> {
     pub fn from_big_int(ctx: &'ctx Context, value: &BigInt) -> Int<'ctx> {
@@ -631,10 +775,10 @@ impl<'ctx> Float<'ctx> {
     }
 }
 
-impl_ast!(Datatype);
+impl_ast!(Datatype, no_static_sort);
 impl_from_try_into_dynamic!(Datatype, as_datatype);
 
-impl_ast!(Dynamic);
+impl_ast!(Dynamic, no_static_sort);
 
 impl<'ctx> Bool<'ctx> {
     pub fn new_const<S: Into<Symbol>>(ctx: &'ctx Context, name: S) -> Bool<'ctx> {
@@ -1808,7 +1952,7 @@ impl<'ctx> Set<'ctx> {
     }
 }
 
-impl<'ctx> Seq<'ctx> {
+impl<'ctx, Elem: Ast<'ctx>> Seq<'ctx, Elem> {
     pub fn new_const<S: Into<Symbol>>(ctx: &'ctx Context, name: S, eltype: &Sort<'ctx>) -> Self {
         let sort = Sort::seq(ctx, eltype);
         unsafe {
@@ -1864,9 +2008,9 @@ impl<'ctx> Seq<'ctx> {
     ///         ._eq(&Bool::from_bool(&ctx, true))
     /// );
     /// ```
-    pub fn nth(&self, index: &Int<'ctx>) -> Dynamic<'ctx> {
+    pub fn nth(&self, index: &Int<'ctx>) -> Elem {
         unsafe {
-            Dynamic::wrap(
+            Elem::wrap(
                 self.ctx,
                 Z3_mk_seq_nth(self.ctx.z3_ctx, self.z3_ast, index.z3_ast),
             )
@@ -1992,9 +2136,16 @@ impl<'ctx> Dynamic<'ctx> {
     }
 
     /// Returns `None` if the `Dynamic` is not actually a `Seq`.
-    pub fn as_seq(&self) -> Option<Seq<'ctx>> {
+    pub fn as_seq<Elem: Ast<'ctx>>(&self) -> Option<Seq<'ctx, Elem>> {
         match self.sort_kind() {
-            SortKind::Seq => Some(unsafe { Seq::wrap(self.ctx, self.z3_ast) }),
+            SortKind::Seq => match (self.get_sort().seq_basis(), Elem::get_sort_static(self.ctx)) {
+                (Some(self_sort), Some(target_sort)) if self_sort.eq(&target_sort) => {
+                    Some(unsafe { Seq::wrap(self.ctx, self.z3_ast) })
+                }
+                (Some(_self_sort), Some(_target_sort)) => None,
+                (Some(_self_sort), None) => Some(unsafe { Seq::wrap(self.ctx, self.z3_ast) }),
+                (None, _) => None,
+            },
             _ => None,
         }
     }

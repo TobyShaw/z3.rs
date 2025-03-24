@@ -3615,6 +3615,7 @@ extern "C" {
     /// - [`Z3_get_sort_kind`]
     pub fn Z3_get_array_sort_range(c: Z3_context, t: Z3_sort) -> Z3_sort;
 
+    pub fn Z3_get_seq_sort_basis(c: Z3_context, t: Z3_sort) -> Z3_sort;
     /// Return the constructor declaration of the given tuple
     /// sort.
     ///

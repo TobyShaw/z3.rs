@@ -205,6 +205,9 @@ impl<'ctx> Sort<'ctx> {
     pub fn is_array(&self) -> bool {
         self.kind() == SortKind::Array
     }
+    pub fn is_sequence(&self) -> bool {
+        self.kind() == SortKind::Seq
+    }
 
     /// Return the `Sort` of the domain for `Array`s of this `Sort`.
     ///
@@ -228,6 +231,20 @@ impl<'ctx> Sort<'ctx> {
         if self.is_array() {
             unsafe {
                 let domain_sort = Z3_get_array_sort_domain(self.ctx.z3_ctx, self.z3_sort);
+                if domain_sort.is_null() {
+                    None
+                } else {
+                    Some(Self::wrap(self.ctx, domain_sort))
+                }
+            }
+        } else {
+            None
+        }
+    }
+    pub fn seq_basis(&self) -> Option<Sort<'ctx>> {
+        if self.is_sequence() {
+            unsafe {
+                let domain_sort = Z3_get_seq_sort_basis(self.ctx.z3_ctx, self.z3_sort);
                 if domain_sort.is_null() {
                     None
                 } else {
